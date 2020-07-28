@@ -1,0 +1,88 @@
+# Befehle zum erstellen des Image und push auf Docker Repository:
+#cd /home/sukerl/Data/Workspaces/Binance/Docker/ActiveMQ
+#docker build -t activemq:5.16.0 -f Dockerfile .
+#docker images
+#docker login https://kube-ingress1.sukerl.lan/ -u docker -p docker
+#docker tag 87264e188d79 kube-ingress1.sukerl.lan/activemq:latest
+#docker push kube-ingress1.sukerl.lan/activemq:latest
+#docker logout https://kube-ingress1.sukerl.lan/
+#-------------------------------------------------------------------------------
+
+# Zuerst temporäres Buildimage für Customizing der Java-Umgebung erstellen
+FROM ubuntu:18.04 AS build
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# JDK und binutils installieren
+RUN apt-get update -q \
+ && apt-get upgrade -q -y \
+ && apt-get install -q -y \
+        binutils \
+        openjdk-11-jdk-headless
+
+# Modulare Custom-JRE bauen & strippen
+RUN jlink --output /opt/java \
+ --add-modules java.base,java.logging,java.xml,jdk.unsupported,java.sql,java.naming,java.desktop,java.management,java.security.jgss,java.instrument,jdk.management.agent \
+ --compress 2 --no-header-files --no-man-pages \
+ && strip -p --strip-unneeded /opt/java/lib/server/libjvm.so
+
+# Eigentliches Image bauen
+FROM ubuntu:18.04
+
+# Add Maintainer Info
+LABEL maintainer="Sukerl"
+
+# Benötigte Variablen und Ports für ActiveMQ setzen
+ENV ACTIVEMQ_VERSION 5.16.0
+ENV ACTIVEMQ apache-activemq-$ACTIVEMQ_VERSION
+ENV ACTIVEMQ_TCP=61616 ACTIVEMQ_AMQP=5672 ACTIVEMQ_STOMP=61613 ACTIVEMQ_MQTT=1883 ACTIVEMQ_WS=61614 ACTIVEMQ_UI=8161
+ENV ACTIVEMQ_HOME /opt/activemq
+
+# Benötigte Variablen für Java-Runtime setzen
+ENV JAVA_HOME /opt/java
+ENV JAVACMD /opt/java/bin/java
+
+# Custom-Java vom Basisimage kopieren
+COPY --from=build /opt/java /opt/java
+
+# Benötigte Tools nachinstallieren
+RUN apt-get -qqy update && \
+    apt-get -qqy install apt-utils wget curl gnupg2 locales tzdata traceroute net-tools && \
+	apt-get autoclean -qqy && \
+	apt-get autoremove -qqy && \
+	locale-gen en_US.UTF-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Zeitzone setzen
+RUN ln -fs /usr/share/zoneinfo/Europe/Vienna /etc/localtime \
+ && dpkg-reconfigure -f noninteractive tzdata
+
+# Sprache auf US-Englisch setzen
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
+
+# Tarball für ActiveMQ herunterladen
+RUN curl "https://archive.apache.org/dist/activemq/$ACTIVEMQ_VERSION/$ACTIVEMQ-bin.tar.gz" -o $ACTIVEMQ-bin.tar.gz
+
+# Tarball entpacken, Benutzer anlegen und berechtigen
+RUN tar xzf $ACTIVEMQ-bin.tar.gz -C  /opt && \
+    ln -s /opt/$ACTIVEMQ $ACTIVEMQ_HOME && \
+    useradd -r -M -d $ACTIVEMQ_HOME activemq && \
+    chown -R activemq:activemq /opt/$ACTIVEMQ && \
+    chown -h activemq:activemq $ACTIVEMQ_HOME 
+
+# Zur Runtime auf activemq Benutzer wechseln
+USER activemq
+
+# Ausführungsverzeichnis setzen 
+WORKDIR $ACTIVEMQ_HOME
+
+# Ports exponieren
+EXPOSE $ACTIVEMQ_TCP $ACTIVEMQ_AMQP $ACTIVEMQ_STOMP $ACTIVEMQ_MQTT $ACTIVEMQ_WS $ACTIVEMQ_UI
+
+# Hostname für Admin GUI im Configfile ändern, damit von aussen darauf zugegriffen werden kann. 
+RUN sed -i "s|127.0.0.1|0.0.0.0|g" $ACTIVEMQ_HOME/conf/jetty.xml
+
+# ActiveMQ starten
+CMD ["/bin/sh", "-c", "bin/activemq console"]
